@@ -29,7 +29,7 @@ An interactive deployment wizard for [paqet](https://github.com/hanselime/paqet)
 
 ```bash
 # Download the script
-curl -O https://raw.githubusercontent.com/your-repo/paqet-script/main/deploy-paqet.sh
+curl -O https://raw.githubusercontent.com/knownasmobin/paqet-script/main/deploy-paqet.sh
 
 # Make executable
 chmod +x deploy-paqet.sh
