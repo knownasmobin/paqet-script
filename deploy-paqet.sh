@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Paqet Deployment Script v2.1.1
+# Paqet Deployment Script v2.1.2
 # Automated installation and configuration for paqet packet-level proxy
 # Supports Linux (Debian/RHEL) and macOS
 # Supports multiple tunnel instances running simultaneously
@@ -13,7 +13,7 @@ set -euo pipefail
 # ============================================================================
 # CONSTANTS & DEFAULTS
 # ============================================================================
-readonly SCRIPT_VERSION="2.1.1"
+readonly SCRIPT_VERSION="2.1.2"
 readonly GITHUB_REPO="hanselime/paqet"
 readonly GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}"
 readonly DEFAULT_PORT=9999
@@ -1801,47 +1801,16 @@ main() {
     install_dependencies "$os" "$pkg_mgr"
 
     # =========================================================================
-    # STEP 4: Download Binary (skip if adding new instance or binary exists)
+    # STEP 4: Download Binary (skip if binary already exists)
     # =========================================================================
-    if [[ -n "$INSTANCE_SUFFIX" ]]; then
-        # Creating additional instance - binary already exists
-        if [[ ! -x "${install_dir}/paqet" ]]; then
-            log_error "Binary not found at ${install_dir}/paqet"
-            exit 1
-        fi
-        log_info "Using existing binary for new instance"
-    elif [[ "$skip_download" == true ]]; then
-        if [[ ! -x "${install_dir}/paqet" ]]; then
-            log_error "Binary not found at ${install_dir}/paqet"
-            exit 1
-        fi
+    if [[ -x "${install_dir}/paqet" ]]; then
+        # Binary already exists - use it
         log_info "Using existing binary at ${install_dir}/paqet"
-    elif [[ -x "${install_dir}/paqet" ]]; then
-        # Binary exists, ask if user wants to update
-        log_info "Existing binary found at ${install_dir}/paqet"
-        if prompt_confirm "Download and update to latest version?" "n"; then
-            local version
-            version=$(get_latest_release)
-            log_success "Latest version: ${version}"
-
-            # Stop existing service before updating binary
-            if [[ "$os" == "linux" ]] && check_command systemctl; then
-                if systemctl is-active --quiet "paqet" 2>/dev/null; then
-                    log_info "Stopping paqet service for binary update..."
-                    $SUDO systemctl stop paqet
-                    download_binary "$os" "$arch" "$version" "$install_dir"
-                    log_info "Restarting paqet service..."
-                    $SUDO systemctl start paqet
-                else
-                    download_binary "$os" "$arch" "$version" "$install_dir"
-                fi
-            else
-                download_binary "$os" "$arch" "$version" "$install_dir"
-            fi
-        else
-            log_info "Keeping existing binary"
-        fi
+    elif [[ "$skip_download" == true ]]; then
+        log_error "Binary not found at ${install_dir}/paqet"
+        exit 1
     else
+        # Fresh install - download binary
         local version
         version=$(get_latest_release)
         log_success "Latest version: ${version}"
