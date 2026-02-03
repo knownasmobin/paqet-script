@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Paqet Deployment Script v2.0
+# Paqet Deployment Script v2.1
 # Automated installation and configuration for paqet packet-level proxy
 # Supports Linux (Debian/RHEL) and macOS
+# Supports multiple tunnel instances running simultaneously
 #
 # Repository: https://github.com/hanselime/paqet
 #
@@ -12,7 +13,7 @@ set -euo pipefail
 # ============================================================================
 # CONSTANTS & DEFAULTS
 # ============================================================================
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly GITHUB_REPO="hanselime/paqet"
 readonly GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}"
 readonly DEFAULT_PORT=9999
@@ -43,6 +44,8 @@ LOG_LEVEL=""
 SOCKS_PORT=""
 SERVER_ADDRESS=""
 SUDO=""
+INSTANCE_NAME="paqet"
+INSTANCE_SUFFIX=""
 declare -a PORT_FORWARDS=()
 
 # KCP Performance configuration
@@ -172,6 +175,165 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+# ============================================================================
+# EXISTING INSTALLATION DETECTION
+# ============================================================================
+
+detect_existing_installations() {
+    local os="$1"
+    local found=0
+
+    echo ""
+    log_step "Checking for Existing Paqet Installations"
+
+    # Find all paqet config files
+    local configs=()
+    if [[ -d "$INSTALL_DIR" ]]; then
+        while IFS= read -r -d '' config; do
+            configs+=("$config")
+        done < <(find "$INSTALL_DIR" -name "*.yaml" -type f -print0 2>/dev/null)
+    fi
+
+    # Check for running paqet processes
+    local running_pids=()
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && running_pids+=("$pid")
+    done < <(pgrep -f "paqet.*run" 2>/dev/null)
+
+    if [[ ${#configs[@]} -eq 0 && ${#running_pids[@]} -eq 0 ]]; then
+        log_info "No existing paqet installations found."
+        return 1
+    fi
+
+    found=1
+    echo ""
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║                    EXISTING PAQET INSTALLATIONS                       ║${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # Show running processes
+    if [[ ${#running_pids[@]} -gt 0 ]]; then
+        echo -e "${CYAN}Running Processes:${NC}"
+        for pid in "${running_pids[@]}"; do
+            local cmdline
+            cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
+            if [[ -n "$cmdline" ]]; then
+                echo -e "  ${GREEN}●${NC} PID $pid: $cmdline"
+            fi
+        done
+        echo ""
+    fi
+
+    # Show configuration files and their details
+    if [[ ${#configs[@]} -gt 0 ]]; then
+        echo -e "${CYAN}Configuration Files:${NC}"
+        for config in "${configs[@]}"; do
+            echo ""
+            echo -e "  ${BLUE}▸ $config${NC}"
+
+            # Parse config file for key information
+            if [[ -f "$config" ]]; then
+                local cfg_role cfg_port cfg_server cfg_socks
+                cfg_role=$(grep -E "^role:" "$config" 2>/dev/null | awk '{print $2}' || echo "unknown")
+
+                if [[ "$cfg_role" == "server" ]]; then
+                    cfg_port=$(grep -E "addr:.*:" "$config" 2>/dev/null | head -1 | grep -oE ':[0-9]+' | tr -d ':' || echo "?")
+                    echo "    Role: ${cfg_role}"
+                    echo "    Port: ${cfg_port}"
+                else
+                    cfg_server=$(grep -E "^\s*addr:" "$config" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '"' || echo "?")
+                    cfg_socks=$(grep -E "listen:.*127.0.0.1:" "$config" 2>/dev/null | head -1 | grep -oE ':[0-9]+' | tr -d ':' || echo "?")
+                    echo "    Role: ${cfg_role}"
+                    echo "    Server: ${cfg_server}"
+                    echo "    SOCKS5 Port: ${cfg_socks}"
+                fi
+
+                # Check if this config has an active service
+                local service_name
+                service_name=$(basename "$config" .yaml)
+                if [[ "$os" == "linux" ]] && check_command systemctl; then
+                    if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+                        echo -e "    Service: ${GREEN}running${NC} ($service_name)"
+                    elif systemctl is-enabled --quiet "$service_name" 2>/dev/null; then
+                        echo -e "    Service: ${YELLOW}stopped${NC} ($service_name)"
+                    fi
+                fi
+            fi
+        done
+        echo ""
+    fi
+
+    return 0
+}
+
+prompt_installation_action() {
+    echo ""
+    echo -e "${CYAN}What would you like to do?${NC}"
+    echo ""
+
+    local action_choice
+    action_choice=$(prompt_choice "Select an action:" \
+        "Create a NEW tunnel (alongside existing)" \
+        "Reconfigure existing installation" \
+        "View status only and exit")
+
+    case "$action_choice" in
+        0)
+            # Create new instance
+            configure_new_instance
+            return 0
+            ;;
+        1)
+            # Reconfigure - use default names
+            INSTANCE_NAME="paqet"
+            INSTANCE_SUFFIX=""
+            return 0
+            ;;
+        2)
+            # Exit
+            echo ""
+            log_info "Exiting. No changes made."
+            exit 0
+            ;;
+    esac
+}
+
+configure_new_instance() {
+    echo ""
+    log_info "Creating a new paqet tunnel instance."
+    echo ""
+
+    # Generate a unique instance name
+    local instance_num=2
+    while [[ -f "${INSTALL_DIR}/config-${instance_num}.yaml" ]] || \
+          systemctl is-enabled --quiet "paqet-${instance_num}" 2>/dev/null; do
+        instance_num=$((instance_num + 1))
+    done
+
+    INSTANCE_SUFFIX="-${instance_num}"
+    INSTANCE_NAME="paqet${INSTANCE_SUFFIX}"
+
+    log_info "New instance will be named: ${INSTANCE_NAME}"
+    log_info "Config file: ${INSTALL_DIR}/config${INSTANCE_SUFFIX}.yaml"
+    echo ""
+
+    # Suggest different default ports
+    local suggested_port=$((DEFAULT_PORT + instance_num - 1))
+    local suggested_socks=$((DEFAULT_SOCKS_PORT + instance_num - 1))
+
+    log_warn "Make sure to use different ports from existing instances!"
+    log_info "Suggested ports: Server=${suggested_port}, SOCKS5=${suggested_socks}"
+}
+
+get_config_filename() {
+    if [[ -n "$INSTANCE_SUFFIX" ]]; then
+        echo "config${INSTANCE_SUFFIX}.yaml"
+    else
+        echo "$CONFIG_FILE"
+    fi
+}
 
 # ============================================================================
 # SYSTEM DETECTION
@@ -1090,7 +1252,9 @@ EOF
 
 generate_config() {
     local install_dir="$1"
-    local config_path="${install_dir}/${CONFIG_FILE}"
+    local config_filename
+    config_filename=$(get_config_filename)
+    local config_path="${install_dir}/${config_filename}"
 
     log_step "Generating Configuration File"
 
@@ -1208,25 +1372,27 @@ persist_iptables_rules() {
 
 create_systemd_service() {
     local install_dir="$1"
-    local service_name="paqet"
+    local service_name="$INSTANCE_NAME"
+    local config_filename
+    config_filename=$(get_config_filename)
     local service_file="/etc/systemd/system/${service_name}.service"
 
-    log_info "Creating systemd service..."
+    log_info "Creating systemd service: ${service_name}..."
 
     $SUDO tee "$service_file" > /dev/null << EOF
 [Unit]
-Description=Paqet Packet-Level Proxy
+Description=Paqet Packet-Level Proxy (${service_name})
 After=network.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${install_dir}/paqet run -c ${install_dir}/${CONFIG_FILE}
+ExecStart=${install_dir}/paqet run -c ${install_dir}/${config_filename}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=paqet
+SyslogIdentifier=${service_name}
 NoNewPrivileges=false
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
@@ -1239,15 +1405,18 @@ EOF
     $SUDO systemctl enable "$service_name"
     $SUDO systemctl start "$service_name"
 
-    log_success "Systemd service created and started."
+    log_success "Systemd service '${service_name}' created and started."
 }
 
 create_launchd_service() {
     local install_dir="$1"
-    local plist_name="com.paqet.daemon"
+    local plist_name="com.${INSTANCE_NAME}.daemon"
+    local config_filename
+    config_filename=$(get_config_filename)
     local plist_file="/Library/LaunchDaemons/${plist_name}.plist"
+    local log_name="${INSTANCE_NAME}"
 
-    log_info "Creating launchd service..."
+    log_info "Creating launchd service: ${plist_name}..."
 
     $SUDO tee "$plist_file" > /dev/null << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1261,7 +1430,7 @@ create_launchd_service() {
         <string>${install_dir}/paqet</string>
         <string>run</string>
         <string>-c</string>
-        <string>${install_dir}/${CONFIG_FILE}</string>
+        <string>${install_dir}/${config_filename}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -1271,9 +1440,9 @@ create_launchd_service() {
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>/var/log/paqet.log</string>
+    <string>/var/log/${log_name}.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/paqet.error.log</string>
+    <string>/var/log/${log_name}.error.log</string>
 </dict>
 </plist>
 EOF
@@ -1282,7 +1451,7 @@ EOF
     $SUDO chown root:wheel "$plist_file"
     $SUDO launchctl load "$plist_file"
 
-    log_success "Launchd service created and loaded."
+    log_success "Launchd service '${plist_name}' created and loaded."
 }
 
 setup_service() {
@@ -1328,7 +1497,7 @@ health_check_server() {
         log_success "Paqet process is running."
     else
         log_error "Paqet process is not running!"
-        log_info "Check logs: journalctl -u paqet -f"
+        log_info "Check logs: journalctl -u ${INSTANCE_NAME} -f"
         return 1
     fi
 
@@ -1370,7 +1539,7 @@ health_check_client() {
         log_success "Paqet process is running."
     else
         log_error "Paqet process is not running!"
-        log_info "Check logs: journalctl -u paqet -f"
+        log_info "Check logs: journalctl -u ${INSTANCE_NAME} -f"
         return 1
     fi
 
@@ -1428,7 +1597,7 @@ health_check_client() {
         echo -e "${RED}║${NC}  • Incorrect server IP/port                                  ${RED}║${NC}"
         echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
         echo ""
-        log_info "Debug with: journalctl -u paqet -f"
+        log_info "Debug with: journalctl -u ${INSTANCE_NAME} -f"
         log_info "Or manual test: curl -v ${HEALTH_CHECK_URL} --proxy socks5h://127.0.0.1:${socks_port}"
         exit_code=1
     fi
@@ -1453,8 +1622,16 @@ run_health_check() {
 print_summary() {
     local install_dir="$1"
     local os="$2"
+    local config_filename
+    config_filename=$(get_config_filename)
 
     log_step "Installation Summary"
+
+    # Show instance info if this is an additional instance
+    if [[ -n "$INSTANCE_SUFFIX" ]]; then
+        echo ""
+        echo -e "${YELLOW}Instance: ${INSTANCE_NAME}${NC}"
+    fi
 
     echo ""
     echo -e "${CYAN}Configuration:${NC}"
@@ -1496,7 +1673,7 @@ print_summary() {
     echo ""
     echo -e "${CYAN}Files:${NC}"
     echo "  Binary:          ${install_dir}/paqet"
-    echo "  Configuration:   ${install_dir}/${CONFIG_FILE}"
+    echo "  Configuration:   ${install_dir}/${config_filename}"
 
     if [[ "$ROLE" == "server" ]]; then
         echo ""
@@ -1505,14 +1682,14 @@ print_summary() {
 
     echo ""
     echo -e "${CYAN}Manual Commands:${NC}"
-    echo "  Start:   sudo ${install_dir}/paqet run -c ${install_dir}/${CONFIG_FILE}"
+    echo "  Start:   sudo ${install_dir}/paqet run -c ${install_dir}/${config_filename}"
 
     if [[ "$os" == "linux" ]] && check_command systemctl; then
-        echo "  Service: sudo systemctl {start|stop|status|restart} paqet"
-        echo "  Logs:    sudo journalctl -u paqet -f"
+        echo "  Service: sudo systemctl {start|stop|status|restart} ${INSTANCE_NAME}"
+        echo "  Logs:    sudo journalctl -u ${INSTANCE_NAME} -f"
     elif [[ "$os" == "darwin" ]]; then
-        echo "  Service: sudo launchctl {load|unload} /Library/LaunchDaemons/com.paqet.daemon.plist"
-        echo "  Logs:    tail -f /var/log/paqet.log"
+        echo "  Service: sudo launchctl {load|unload} /Library/LaunchDaemons/com.${INSTANCE_NAME}.daemon.plist"
+        echo "  Logs:    tail -f /var/log/${INSTANCE_NAME}.log"
     fi
 
     if [[ "$ROLE" == "client" ]]; then
@@ -1534,6 +1711,7 @@ main() {
     # Parse arguments
     local custom_install_dir=""
     local skip_download=false
+    local force_new=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1545,12 +1723,17 @@ main() {
                 skip_download=true
                 shift
                 ;;
+            --new)
+                force_new=true
+                shift
+                ;;
             -h|--help)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
                 echo "  --install-dir DIR    Custom installation directory (default: /opt/paqet)"
                 echo "  --skip-download      Skip binary download (use existing)"
+                echo "  --new                Force creation of new instance"
                 echo "  -h, --help           Show this help message"
                 exit 0
                 ;;
@@ -1564,7 +1747,24 @@ main() {
     local install_dir="${custom_install_dir:-$INSTALL_DIR}"
 
     # =========================================================================
-    # STEP 1: Immediate Role Selection
+    # STEP 0: Detect OS early for installation check
+    # =========================================================================
+    local os_early
+    os_early=$(detect_os)
+
+    # =========================================================================
+    # STEP 1: Check for Existing Installations
+    # =========================================================================
+    if detect_existing_installations "$os_early"; then
+        if [[ "$force_new" == true ]]; then
+            configure_new_instance
+        else
+            prompt_installation_action
+        fi
+    fi
+
+    # =========================================================================
+    # STEP 2: Role Selection
     # =========================================================================
     echo ""
     local role_choice
@@ -1658,16 +1858,23 @@ main() {
     # =========================================================================
     # STEP 11: Health Check
     # =========================================================================
+    local config_filename
+    config_filename=$(get_config_filename)
+
     if [[ "$service_created" == true ]]; then
         run_health_check "$install_dir"
     else
         echo ""
         log_info "Service not started. Run manually to test:"
-        echo -e "  ${GREEN}sudo ${install_dir}/paqet run -c ${install_dir}/${CONFIG_FILE}${NC}"
+        echo -e "  ${GREEN}sudo ${install_dir}/paqet run -c ${install_dir}/${config_filename}${NC}"
     fi
 
     echo ""
-    log_success "Paqet ${ROLE} deployment complete!"
+    if [[ -n "$INSTANCE_SUFFIX" ]]; then
+        log_success "Paqet ${ROLE} instance '${INSTANCE_NAME}' deployment complete!"
+    else
+        log_success "Paqet ${ROLE} deployment complete!"
+    fi
 }
 
 # Run main

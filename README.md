@@ -8,6 +8,7 @@ An interactive deployment wizard for [paqet](https://github.com/hanselime/paqet)
 - **Interactive Wizard**: Step-by-step guided configuration
 - **Auto-Detection**: Automatically detects network interface, IP, gateway MAC
 - **Server/Client Modes**: Full support for both deployment roles
+- **Multi-Instance Support**: Run multiple tunnels simultaneously on the same machine
 - **Performance Profiles**: Pre-configured KCP tuning options for different use cases
 - **Port Forwarding**: Configure TCP/UDP port forwarding rules on client
 - **Service Management**: Automatic systemd (Linux) and launchd (macOS) service creation
@@ -46,6 +47,7 @@ Usage: deploy-paqet.sh [OPTIONS]
 Options:
   --install-dir DIR    Custom installation directory (default: /opt/paqet)
   --skip-download      Skip binary download (use existing binary)
+  --new                Force creation of new instance (skip detection prompt)
   -h, --help           Show help message
 ```
 
@@ -77,6 +79,39 @@ The server will be ready to accept connections once deployment completes.
 Test the connection:
 ```bash
 curl https://httpbin.org/ip --proxy socks5h://127.0.0.1:1080
+```
+
+### Multiple Instances
+
+The script automatically detects existing paqet installations. When an existing installation is found, you'll see:
+
+1. **Running processes** - Shows all active paqet tunnels
+2. **Configuration files** - Lists all configs with their role, ports, and service status
+
+You can then choose to:
+- **Create a NEW tunnel** - Adds another instance alongside existing ones
+- **Reconfigure existing** - Overwrites the primary configuration
+- **View status only** - Exit without changes
+
+Each additional instance gets:
+- Unique service name (e.g., `paqet-2`, `paqet-3`)
+- Separate config file (e.g., `config-2.yaml`, `config-3.yaml`)
+- Independent service management
+
+**Managing multiple instances:**
+```bash
+# List all paqet services
+sudo systemctl list-units 'paqet*'
+
+# Manage specific instance
+sudo systemctl status paqet-2
+sudo systemctl restart paqet-2
+sudo journalctl -u paqet-2 -f
+```
+
+**Force create new instance:**
+```bash
+sudo ./deploy-paqet.sh --new
 ```
 
 ## Performance Tuning
